@@ -18,7 +18,7 @@ def compute_gaussian_model(frames: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     return mean.astype(np.float32), var.astype(np.float32)
 
 
-def process_video(input_path: str, out_mask: str, out_fg: str, pct_train: float = 10.0, alpha: float = 2.5, fourcc: str = 'mp4v'):
+def process_video(input_path: str, out_mask: str, out_fg: str, pct_train: float = 25.0, alpha: float = 2.5, fourcc: str = 'mp4v', morph: bool = True, morph_kernel: int = 5, morph_iter: int = 1):
     """Process the video.
 
     pct_train: percentage of frames (0-100) to use for building the model from the start of the video.
@@ -67,16 +67,37 @@ def process_video(input_path: str, out_mask: str, out_fg: str, pct_train: float 
         if not ret:
             break
 
+        # we could do (R+G+B)/3 instead of just gray
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.float32)
 
         diff = np.abs(gray - mean)
-        fg_mask = diff > (alpha * std)
 
+        fg_mask = diff > alpha * (std + 2)  # add small constant to avoid zero std
+
+        # convert to 0/255 uint8 image for morphology
         mask_img = (fg_mask.astype('uint8') * 255)
+
+        # morphological filtering to remove noise and group objects
+        if morph:
+            # ensure kernel is a positive odd integer
+            k = int(max(1, morph_kernel))
+            if k % 2 == 0:
+                k += 1
+
+            mask_img = cv2.medianBlur(mask_img, 5)
+
+            kernel_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3,3))
+            mask_img = cv2.morphologyEx(mask_img, cv2.MORPH_OPEN, kernel_open)
+
+            kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7,7))
+            mask_img = cv2.morphologyEx(mask_img, cv2.MORPH_CLOSE, kernel_close)
+            mask_img = cv2.dilate(mask_img, kernel_close, iterations=1)
 
         mask_bgr = cv2.cvtColor(mask_img, cv2.COLOR_GRAY2BGR)
 
-        fg_frame = (frame * fg_mask[:, :, None].astype(frame.dtype))
+        # apply the (possibly filtered) mask to the original frame
+        fg_mask2 = (mask_img > 0)
+        fg_frame = (frame * fg_mask2[:, :, None].astype(frame.dtype))
 
         mask_writer.write(mask_bgr)
         fg_writer.write(fg_frame)
@@ -89,11 +110,12 @@ def process_video(input_path: str, out_mask: str, out_fg: str, pct_train: float 
 
 
 def parse_args():
-    p = argparse.ArgumentParser(description="Gaussian background extractor (first N frames model)")
+    p = argparse.ArgumentParser(description="Gaussian background extractor")
     p.add_argument('input', help='Input video path')
-    p.add_argument('--pct-train', type=float, default=10.0, help='Percentage of frames to build the model (0-100)')
+    p.add_argument('--pct-train', type=float, default=25.0, help='Percentage of frames to build the model (0-100)')
     p.add_argument('--alpha', type=float, default=2.5, help='Threshold in multiples of std dev')
     p.add_argument('--fourcc', default='mp4v', help="FourCC code for output video (default 'mp4v')")
+    p.add_argument('--no-morph', action='store_true', help='Disable morphological filtering of the mask')
     return p.parse_args()
 
 
@@ -104,4 +126,14 @@ if __name__ == '__main__':
     out_mask = f"T1_mask.mp4"
     out_fg = f"T1_fg.mp4"
 
-    process_video(args.input, out_mask, out_fg, pct_train=args.pct_train, alpha=args.alpha, fourcc=args.fourcc)
+    process_video(
+        args.input,
+        out_mask,
+        out_fg,
+        pct_train=args.pct_train,
+        alpha=args.alpha,
+        fourcc=args.fourcc,
+        morph=(not args.no_morph),
+        morph_kernel=args.morph_kernel,
+        morph_iter=args.morph_iter,
+    )

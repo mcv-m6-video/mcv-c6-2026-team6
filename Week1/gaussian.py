@@ -1,8 +1,9 @@
-from typing import Tuple
+from typing import Tuple, List
 import argparse
 import os
 import cv2
 import numpy as np
+import json
 
 from tqdm import tqdm
 
@@ -11,18 +12,41 @@ from utils import get_video_props, read_frames, open_video_writer
 
 def compute_gaussian_model(frames: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     """Given stacked grayscale frames shape (N,H,W), return mean and var arrays (H,W) float32."""
-    # ensure float for accurate mean/var
     frames_f = frames.astype(np.float32)
     mean = np.mean(frames_f, axis=0)
     var = np.var(frames_f, axis=0)
     return mean.astype(np.float32), var.astype(np.float32)
 
 
-def process_video(input_path: str, out_mask: str, out_fg: str, pct_train: float = 25.0, alpha: float = 2.5, fourcc: str = 'mp4v', morph: bool = True, morph_kernel: int = 5, morph_iter: int = 1):
-    """Process the video.
+def make_bounding_box(mask: np.ndarray, min_area: int) -> List[Tuple[int, int, int, int]]:
+    """Compute bounding boxes from a binary mask.
 
-    pct_train: percentage of frames (0-100) to use for building the model from the start of the video.
+    Args:
+        mask: Binary mask as a numpy array. Can be bool, 0/1, or 0/255 uint8.
+        min_area: Minimum area in pixels for a box to be returned (filters noise).
+
+    Returns:
+        List of boxes as (x_min, y_min, x_max, y_max).
     """
+    mask_u = (mask.astype(np.uint8) * 255)
+
+    # find contours and bounding rects
+    contours, _ = cv2.findContours(mask_u.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    boxes: List[Tuple[int, int, int, int]] = []
+
+    for cnt in contours:
+        x, y, w, h = cv2.boundingRect(cnt)
+        if w * h >= min_area:
+            boxes.append((x, y, x + w, y + h))
+    return boxes
+
+
+def process_video(input_path: str,
+                  pct_train: float = 25.0,
+                  alphas: List[float] = [2.5],
+                  fourcc: str = 'mp4v',
+                  morph: bool = True):
+
     cap0 = cv2.VideoCapture(input_path)
     if not cap0.isOpened():
         raise IOError(f"Cannot open video: {input_path}")
@@ -51,71 +75,110 @@ def process_video(input_path: str, out_mask: str, out_fg: str, pct_train: float 
     if not cap.isOpened():
         raise IOError(f"Cannot open video: {input_path}")
 
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+    cap.set(cv2.CAP_PROP_POS_FRAMES, N)
+
     _, fps, width, height = get_video_props(cap)
     frame_size = (width, height)
 
     # writers
-    mask_writer = open_video_writer(out_mask, fourcc, fps, frame_size, is_color=True)
-    fg_writer = open_video_writer(out_fg, fourcc, fps, frame_size, is_color=True)
+    mask_writers = {}
+    fg_writers = {}
 
-    frame_idx = 0
+    for alpha in alphas:
+        mask_writers[alpha] = open_video_writer(
+            f"T1_mask_{alpha}.mp4", fourcc, fps, frame_size, True
+        )
+        fg_writers[alpha] = open_video_writer(
+            f"T1_fg_{alpha}.mp4", fourcc, fps, frame_size, True
+        )
 
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    frame_idx = N
 
-    for _ in tqdm(range(total_frames), desc="Processing frames"):
+    preds_dict = {alpha: {} for alpha in alphas}
+
+    for _ in tqdm(range(N, total_frames), desc="Processing frames"):
         ret, frame = cap.read()
         if not ret:
             break
 
-        # we could do (R+G+B)/3 instead of just gray
+        # COMPUTATION
+        # we could do  (R+G+B)/3 instead of just gray
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.float32)
 
         diff = np.abs(gray - mean)
 
-        fg_mask = diff > alpha * (std + 2)  # add small constant to avoid zero std
+        alphas_np = np.array(alphas, dtype=np.float32).reshape(-1, 1, 1)
+        thresholds = alphas_np * (std + 2)
+        diff_expanded = diff[None, :, :]   # shape (1, H, W)
 
-        # convert to 0/255 uint8 image for morphology
-        mask_img = (fg_mask.astype('uint8') * 255)
+        fg_masks_all = diff_expanded > thresholds
 
-        # morphological filtering to remove noise and group objects
-        if morph:
-            # ensure kernel is a positive odd integer
-            k = int(max(1, morph_kernel))
-            if k % 2 == 0:
-                k += 1
+        for idx, alpha in enumerate(alphas):
+            fg_mask = fg_masks_all[idx]
 
-            mask_img = cv2.medianBlur(mask_img, 5)
+            mask_img = (fg_mask.astype('uint8') * 255)
 
-            kernel_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3,3))
-            mask_img = cv2.morphologyEx(mask_img, cv2.MORPH_OPEN, kernel_open)
+            # MORPHOLOGY
+            if morph:
+                mask_img = cv2.medianBlur(mask_img, 5)
 
-            kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7,7))
-            mask_img = cv2.morphologyEx(mask_img, cv2.MORPH_CLOSE, kernel_close)
-            mask_img = cv2.dilate(mask_img, kernel_close, iterations=1)
+                kernel_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3,3))
+                mask_img = cv2.morphologyEx(mask_img, cv2.MORPH_OPEN, kernel_open)
 
-        mask_bgr = cv2.cvtColor(mask_img, cv2.COLOR_GRAY2BGR)
+                kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7,7))
+                mask_img = cv2.morphologyEx(mask_img, cv2.MORPH_CLOSE, kernel_close)
+                mask_img = cv2.dilate(mask_img, kernel_close, iterations=1)
 
-        # apply the (possibly filtered) mask to the original frame
-        fg_mask2 = (mask_img > 0)
-        fg_frame = (frame * fg_mask2[:, :, None].astype(frame.dtype))
+            mask_bgr = cv2.cvtColor(mask_img, cv2.COLOR_GRAY2BGR)
+            fg_mask2 = (mask_img > 0)
 
-        mask_writer.write(mask_bgr)
-        fg_writer.write(fg_frame)
+            # BOXES
+            boxes = make_bounding_box(mask_img, min_area=70*70)
+
+            if len(boxes) > 0:
+                preds_dict[alpha][str(frame_idx)] = [
+                    [int(x1), int(y1), int(x2), int(y2), 1.0]
+                    for (x1, y1, x2, y2) in boxes
+                ]
+
+            alpha_overlay = 0.5
+            overlay = np.zeros_like(frame, dtype=frame.dtype)
+            overlay[:] = (0, 0, 255)
+            blended = cv2.addWeighted(frame, 1.0 - alpha_overlay, overlay, alpha_overlay, 0)
+            fg_frame = np.where(fg_mask2[:, :, None], blended, frame)
+
+            for i, (x1, y1, x2, y2) in enumerate(boxes):
+                cv2.rectangle(mask_bgr, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                cv2.rectangle(fg_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                cv2.putText(fg_frame, f"{i+1}", (x1, max(y1-6,0)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                            (0,255,0), 1, cv2.LINE_AA)
+
+            mask_writers[alpha].write(mask_bgr)
+            fg_writers[alpha].write(fg_frame)
 
         frame_idx += 1
 
     cap.release()
-    mask_writer.release()
-    fg_writer.release()
+    for alpha in alphas:
+        mask_writers[alpha].release()
+        fg_writers[alpha].release()
+        out_pred = f"T1_preds_{alpha}.json"
+        with open(out_pred, 'w') as f:
+            json.dump(preds_dict[alpha], f, indent=2)
 
 
 def parse_args():
     p = argparse.ArgumentParser(description="Gaussian background extractor")
     p.add_argument('input', help='Input video path')
     p.add_argument('--pct-train', type=float, default=25.0, help='Percentage of frames to build the model (0-100)')
-    p.add_argument('--alpha', type=float, default=2.5, help='Threshold in multiples of std dev')
+    p.add_argument('--alpha', type=float, nargs='+', default=[2.5],
+                   help='One or more threshold values (e.g. --alpha 2.0 2.5 3.0)')
     p.add_argument('--fourcc', default='mp4v', help="FourCC code for output video (default 'mp4v')")
     p.add_argument('--no-morph', action='store_true', help='Disable morphological filtering of the mask')
+
     return p.parse_args()
 
 
@@ -123,17 +186,10 @@ if __name__ == '__main__':
     args = parse_args()
     base, _ = os.path.splitext(os.path.basename(args.input))
 
-    out_mask = f"T1_mask.mp4"
-    out_fg = f"T1_fg.mp4"
-
     process_video(
         args.input,
-        out_mask,
-        out_fg,
         pct_train=args.pct_train,
-        alpha=args.alpha,
+        alphas=args.alpha,
         fourcc=args.fourcc,
-        morph=(not args.no_morph),
-        morph_kernel=args.morph_kernel,
-        morph_iter=args.morph_iter,
+        morph=(not args.no_morph)
     )

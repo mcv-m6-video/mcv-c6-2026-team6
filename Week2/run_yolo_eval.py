@@ -300,6 +300,7 @@ def main():
             'yolo26n': 'yolo26n.pt',
             'yolo26s': 'yolo26s.pt',
             'yolo26m': 'yolo26m.pt',
+            'yolo26l': 'yolo26l.pt',
         }
         return mapping.get(n, name)
 

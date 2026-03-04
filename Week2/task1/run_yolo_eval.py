@@ -3,6 +3,7 @@ import json
 import os
 import tempfile
 from collections import defaultdict
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -283,7 +284,8 @@ def run_detection_and_eval(video_path, ann_path, model_path='yolov8n.pt', imgsz=
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--video', default='data/vdo.avi')
+    BASE = Path("data/AICity_data/train/S03/c010/")
+    parser.add_argument('--video', default=BASE / "vdo.avi")
     parser.add_argument('--ann', default='data/annotation.xml')
     parser.add_argument('--model', default='yolo26n.pt')
     parser.add_argument('--imgsz', type=int, default=1280)

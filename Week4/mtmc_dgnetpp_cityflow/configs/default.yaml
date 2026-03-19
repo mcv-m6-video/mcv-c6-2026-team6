@@ -1,0 +1,40 @@
+seed: 42
+data_root: ../AI_CITY_CHALLENGE_2022_TRAIN
+work_dir: ./outputs
+
+split:
+  train_sequences: [S01, S04]
+  test_sequence: S03
+
+reid:
+  backbone: resnet34
+  pretrained_backbone: false
+  image_size: [256, 256]
+  batch_size: 16
+  num_workers: 4
+  epochs: 15
+  lr: 0.0003
+  weight_decay: 0.0005
+  id_dim: 256
+  style_dim: 64
+  margin: 0.3
+  lambda_recon: 1.0
+  lambda_triplet: 1.0
+  lambda_id: 1.0
+
+mtmc:
+  mtsc_file: mtsc_deepsort_mask_rcnn.txt
+  max_time_gap_sec: 20.0
+  # Optional integer offset added to camera numeric ids when writing outputs.
+  # Use 9 for mapping 1..5 -> 10..15 when evaluating sequence S03.
+  camera_id_offset: 0
+  min_sim: 0.71
+  min_track_length: 10
+  min_mean_area: 8000.0
+  keep_only_multicam: true
+  min_global_cameras: 2
+  min_global_rows: 150
+  max_global_ids: 12
+  fps_default: 10.0
+  fps_overrides:
+    c015: 8.0

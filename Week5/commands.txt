@@ -1,0 +1,120 @@
+##############################################################################
+# C6 Week 5 — Ball action classification (SN-BAS-2025 / Task 1 BAC)
+# Paste the block you need; do not run the whole file blindly (data steps are huge).
+# GPU: CUDA_VISIBLE_DEVICES=5 everywhere below.
+##############################################################################
+
+# ---------------------------------------------------------------------------
+# EVERY-SESSION SETUP  (paste this at the start of each working session)
+# ---------------------------------------------------------------------------
+export C6_ROOT=/export/home/group06/workspace/c6w4
+export CUDA_VISIBLE_DEVICES=5
+conda activate c6
+source "${C6_ROOT}/scripts/setup_cache_env.sh"
+
+# ---------------------------------------------------------------------------
+# STEP 0 — Create conda environment  (ONE-TIME — skip if c6 already exists)
+# ---------------------------------------------------------------------------
+conda env create -f "${C6_ROOT}/environment.yml"
+
+# If PyTorch with CUDA is missing after env create, install the CUDA wheel:
+pip install torch==2.3.1 torchvision==0.18.1 torchaudio==2.3.1 \
+    --index-url https://download.pytorch.org/whl/cu121
+
+# ---------------------------------------------------------------------------
+# STEP 1 — Download + merge SN-BAS-2025
+# ---------------------------------------------------------------------------
+
+# 1a) Store the NDA password in a local, gitignored file:
+printf '%s' 'YOUR_NDA_PASSWORD_HERE' > "${C6_ROOT}/sn_bas_pass.txt"
+chmod 600 "${C6_ROOT}/sn_bas_pass.txt"
+
+# 1b) Log in to Hugging Face (one-time):
+# Option A: read from a local file:
+#   export HF_TOKEN=$(cat "${C6_ROOT}/hf.txt")
+# Option B: set directly in the shell:
+#   export HF_TOKEN="YOUR_HF_TOKEN"
+huggingface-cli login --token "${HF_TOKEN}"
+
+# 1c) Download split zips into hf_sn_bas/:
+huggingface-cli download SoccerNet/SN-BAS-2025 \
+    --repo-type dataset \
+    --local-dir "${C6_ROOT}/data/hf_sn_bas"
+
+# 1d) Unzip into sn_bas_2025/ (WinZip AES — needs pyzipper):
+pip install pyzipper
+export SN_BAS_ZIP_PASSWORD=$(cat "${C6_ROOT}/sn_bas_pass.txt")
+bash "${C6_ROOT}/scripts/prepare_sn_bas_data.sh"
+
+# 1e) Verify layout (should report: all X games ok):
+python3 "${C6_ROOT}/scripts/verify_data_layout.py"
+
+# ---------------------------------------------------------------------------
+# STEP 2 — Extract frames  (ONE-TIME — large, takes a while)
+# ---------------------------------------------------------------------------
+export CUDA_VISIBLE_DEVICES=5
+cd "${C6_ROOT}/starter"
+python extract_frames_snb.py \
+    --video_dir "${C6_ROOT}/data/sn_bas_2025" \
+    -o "${C6_ROOT}/data/frames"
+
+# ---------------------------------------------------------------------------
+# STEP 3 — Store clip features  (ONE-TIME per config with store_mode=store)
+# ---------------------------------------------------------------------------
+export CUDA_VISIBLE_DEVICES=5
+cd "${C6_ROOT}/starter"
+source "${C6_ROOT}/scripts/setup_cache_env.sh"
+
+CUDA_VISIBLE_DEVICES=5 python main_classification.py --model baseline_c6_store
+CUDA_VISIBLE_DEVICES=5 python main_classification.py --model ablation_stride1_store
+CUDA_VISIBLE_DEVICES=5 python main_classification.py --model ablation_clip40_store
+CUDA_VISIBLE_DEVICES=5 python main_classification.py --model ablation_overlap050_store
+
+# ---------------------------------------------------------------------------
+# STEP 4 — Training runs
+# ---------------------------------------------------------------------------
+export CUDA_VISIBLE_DEVICES=5
+cd "${C6_ROOT}/starter"
+source "${C6_ROOT}/scripts/setup_cache_env.sh"
+
+CUDA_VISIBLE_DEVICES=5 python main_classification.py --model baseline_c6
+CUDA_VISIBLE_DEVICES=5 python main_classification.py --model baseline_slide15
+CUDA_VISIBLE_DEVICES=5 python main_classification.py --model ablation_rny004
+CUDA_VISIBLE_DEVICES=5 python main_classification.py --model ablation_rny008
+CUDA_VISIBLE_DEVICES=5 python main_classification.py --model ablation_lr0004
+CUDA_VISIBLE_DEVICES=5 python main_classification.py --model ablation_bs2
+CUDA_VISIBLE_DEVICES=5 python main_classification.py --model ablation_stride1
+CUDA_VISIBLE_DEVICES=5 python main_classification.py --model ablation_clip40
+CUDA_VISIBLE_DEVICES=5 python main_classification.py --model ablation_overlap050
+
+# ---------------------------------------------------------------------------
+# STEP 5 — Compute MACs / parameter count
+# ---------------------------------------------------------------------------
+export CUDA_VISIBLE_DEVICES=5
+cd "${C6_ROOT}"
+source "${C6_ROOT}/scripts/setup_cache_env.sh"
+
+python3 scripts/compute_macs.py --model baseline_c6
+python3 scripts/compute_macs.py --model ablation_rny004
+python3 scripts/compute_macs.py --model ablation_rny008
+
+# ---------------------------------------------------------------------------
+# STEP 6 — Report AP10 / AP12 on test split
+# ---------------------------------------------------------------------------
+export CUDA_VISIBLE_DEVICES=5
+cd "${C6_ROOT}/starter"
+source "${C6_ROOT}/scripts/setup_cache_env.sh"
+
+python3 "${C6_ROOT}/scripts/report_ap10_ap12.py" --model baseline_c6
+python3 "${C6_ROOT}/scripts/report_ap10_ap12.py" --model baseline_c6 --mask_rare_inference
+
+# ---------------------------------------------------------------------------
+# STEP 7 — Copy best checkpoint to weights/
+# ---------------------------------------------------------------------------
+cp "${C6_ROOT}/runs/baseline_c6/checkpoints/checkpoint_best.pt" "${C6_ROOT}/weights/"
+
+# ---------------------------------------------------------------------------
+# ALTERNATIVE: run from C6_ROOT without cd starter (wrapper script)
+# ---------------------------------------------------------------------------
+cd "${C6_ROOT}"
+CUDA_VISIBLE_DEVICES=5 bash "${C6_ROOT}/scripts/run_classification.sh" --model baseline_c6
